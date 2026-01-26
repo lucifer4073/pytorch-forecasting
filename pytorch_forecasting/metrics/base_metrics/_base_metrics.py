@@ -10,6 +10,7 @@ import warnings
 from sklearn.base import BaseEstimator
 import torch
 from torch import distributions
+from torch.nn import Module as TorchModule
 from torch.nn.utils import rnn
 from torchmetrics import Metric as LightningMetric
 
@@ -978,6 +979,69 @@ class MultiHorizonMetric(Metric):
             " something went wrong (e.g. input is not in log space)"
         )
         return loss
+
+
+class WrappedTorchLoss(MultiHorizonMetric):
+    """
+    Dynamically created MultiHorizonMetric wrapper for torch.nn loss.
+    """
+
+    def __init__(self, torch_loss: TorchModule, reduction: str = "mean", **kwargs):
+        super().__init__(reduction=reduction, **kwargs)
+
+        self.torch_loss_module = torch_loss
+        if hasattr(self.torch_loss_module, "reduction"):
+            self._original_reduction = self.torch_loss_module.reduction
+            self.torch_loss_module.reduction = "none"
+
+    def loss(
+        self, y_pred: dict[str, torch.Tensor], target: torch.Tensor
+    ) -> torch.Tensor:
+        """
+        Calculate loss without reduction using the wrapped torch loss.
+
+        Args:
+            y_pred: network output dictionary (expects 'prediction' key)
+            target: actual values
+
+        Returns:
+            torch.Tensor: unreduced loss values
+        """
+        prediction = self.to_prediction(y_pred)
+        loss_values = self.torch_loss_module(prediction, target)
+
+        if loss_values.dim() < target.dim():
+            # If loss reduced some dimensions, we need to handle it
+            # This shouldn't happen with reduction='none', but just in case
+            warnings.warn(
+                f"The loss values dimensions : {loss_values.dim()} is \
+                reduced from {target.dim()}"
+            )
+
+        return loss_values
+
+    def __repr__(self):
+        return f"WrappedTorchLoss({self.torch_loss_module.__class__.__name__})"
+
+
+def convert_torchnnmetric_to_multihorizonmetric(
+    torch_loss: TorchModule,
+    reduction: str = "mean",
+    custom_to_prediction=None,
+    custom_to_quantiles=None,
+    **metric_kwargs,
+):
+    metric = WrappedTorchLoss(torch_loss, reduction, **metric_kwargs)
+
+    if custom_to_prediction is not None:
+        metric.to_prediction = lambda out: custom_to_prediction(metric, out)
+
+    if custom_to_quantiles is not None:
+        metric.to_quantiles = lambda out, quantiles=None: custom_to_quantiles(
+            metric, out, quantiles
+        )
+
+    return metric
 
 
 class DistributionLoss(MultiHorizonMetric):
